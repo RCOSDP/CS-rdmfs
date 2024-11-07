@@ -1,12 +1,21 @@
 name: Build RDMFS and run tests
 
-on: [push]
+on:
+  push:
+    tags:
+      - '**'
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build:
 
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 1
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
 
@@ -16,6 +25,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       # You can test your matrix by printing the current Python version
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
@@ -23,6 +34,12 @@ jobs:
         run: |
           sudo apt-get install -y fuse3 libfuse3-dev
           pip install .[dev]
+      - name: Build Docker image
+        run: docker build -t rcosdp/cs-rdmfs .
       - name: Run tests
+        env:
+          RDM_NODE_ID: ${{ secrets.RDM_NODE_ID }}
+          RDM_TOKEN: ${{ secrets.RDM_TOKEN }}
+          RDM_STORAGE: ${{ secrets.RDM_STORAGE }}
         run: |
           pytest --cov
