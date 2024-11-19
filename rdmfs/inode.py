@@ -28,6 +28,7 @@ class BaseInode:
         if not isinstance(id, int):
             raise ValueError('Invalid inode id: {}'.format(id))
         self.id = id
+        self.removed = False
 
     def __str__(self) -> str:
         return f'<{self.__class__.__name__} [id={self.id}, path={self.path}]>'
@@ -37,6 +38,9 @@ class BaseInode:
 
     def invalidate(self, name: Optional[str] = None):
         pass
+
+    def remove(self):
+        self.removed = True
 
     @property
     def parent(self) -> Optional['BaseInode']:
@@ -76,6 +80,14 @@ class BaseInode:
     @property
     def display_path(self) -> str:
         raise self.path
+
+    @property
+    def can_create(self) -> bool:
+        return False
+
+    @property
+    def can_move(self) -> bool:
+        return False
 
 
 class ProjectInode(BaseInode):
@@ -145,6 +157,10 @@ class StorageInode(BaseInode):
     @property
     def display_path(self):
         return f'{self.parent.display_path}{self._storage.name}/'
+
+    @property
+    def can_create(self):
+        return True
 
 
 class BaseFileInode(BaseInode):
@@ -221,6 +237,10 @@ class BaseFileInode(BaseInode):
         path = self._path if not self._path.startswith('/') else self._path[1:]
         return f'{self.storage.path}{path}'
 
+    @property
+    def can_move(self):
+        return True
+
     def _validate(self, object: Union[File, Folder]):
         raise NotImplementedError
 
@@ -263,6 +283,10 @@ class FolderInode(BaseFileInode):
     @property
     def display_path(self):
         return f'{self.parent.display_path}{self.name}/'
+
+    @property
+    def can_create(self) -> bool:
+        return True
 
 
 class NewFile:
@@ -391,7 +415,9 @@ class Inodes:
         """Register new inode."""
         log.debug(f'register: path={parent_inode}, name={name}')
         newfile = NewFile(parent_inode, name)
-        return self._get_object_inode(parent_inode, newfile)
+        inode = self._get_object_inode(parent_inode, newfile)
+        log.debug(f'registered: inode={inode}')
+        return inode
 
     def invalidate(self, inode: Union[int, BaseInode], name: Optional[str] = None):
         """Invalidate inode.
@@ -458,8 +484,13 @@ class Inodes:
         """Get inode for the object."""
         dummy_inode = self._create_object_inode(self.INODE_DUMMY, parent, object)
         for inode in self._inodes.values():
+            if inode.removed:
+                continue
             if inode.path == dummy_inode.path:
                 return inode
+        new_file_inode = self._find_new_file_by_name(parent, dummy_inode.name)
+        if new_file_inode is not None:
+            return new_file_inode
         # Register new inode
         new_inode = None
         for inode in range(self.offset_inode, sys.maxsize):
@@ -483,6 +514,8 @@ class Inodes:
     def _find_new_file_by_name(self, parent: BaseInode, name: str) -> Optional[BaseInode]:
         """Find new file by name."""
         for inode in self._inodes.values():
+            if inode.removed:
+                continue
             if not isinstance(inode, FileInode):
                 continue
             if inode.parent != parent:

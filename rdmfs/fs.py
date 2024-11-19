@@ -173,7 +173,8 @@ class RDMFileSystem(pyfuse3.Operations):
             if self.writable_whitelist is not None and \
                 not self.writable_whitelist.includes(parent_inode, sname):
                 raise pyfuse3.FUSEError(errno.EACCES)
-
+            if not parent_inode.can_create:
+                raise pyfuse3.FUSEError(errno.EACCES)
             inode = self.inodes.register(parent_inode, sname)
             entry = pyfuse3.EntryAttributes()
             entry.st_mode = (stat.S_IFREG | 0o644)
@@ -271,6 +272,8 @@ class RDMFileSystem(pyfuse3.Operations):
             if self.writable_whitelist is not None and \
                 not self.writable_whitelist.includes(inode, sname + '/'):
                 raise pyfuse3.FUSEError(errno.EACCES)
+            if not inode.can_create:
+                raise pyfuse3.FUSEError(errno.EACCES)
             new_folder = await inode.object.create_folder(sname)
             new_attr = await self.lookup(parent_inode_num, name)
             log.info('mkdir: folder={}, attr={}'.format(new_folder, new_attr))
@@ -305,7 +308,8 @@ class RDMFileSystem(pyfuse3.Operations):
                 raise pyfuse3.FUSEError(errno.ENOTEMPTY)
             log.info('rmdir: folder={}'.format(target))
             await target.object.remove()
-            self.inodes.invalidate(target)
+            target.remove()
+            self.inodes.invalidate(parent_inode)
         except pyfuse3.FUSEError as e:
             raise e
         except BaseException as e:
@@ -333,6 +337,10 @@ class RDMFileSystem(pyfuse3.Operations):
                 raise pyfuse3.FUSEError(errno.EACCES)
             if self.writable_whitelist is not None and \
                 not self.writable_whitelist.includes(parent_inode_new, sname_new):
+                raise pyfuse3.FUSEError(errno.EACCES)
+            if not target_old.can_move:
+                raise pyfuse3.FUSEError(errno.EACCES)
+            if not parent_inode_new.can_create:
                 raise pyfuse3.FUSEError(errno.EACCES)
             target_old_obj = target_old.object
             storage_new = parent_inode_new.storage.object
@@ -373,6 +381,7 @@ class RDMFileSystem(pyfuse3.Operations):
             log.info('unlink: file={}'.format(target))
             await target.refresh(self.inodes)
             await target.object.remove()
+            target.remove()
             self.inodes.invalidate(parent_inode)
         except pyfuse3.FUSEError as e:
             raise e
