@@ -184,6 +184,9 @@ class BaseFileInode(BaseInode):
         self._last_loaded = None
         self._updated_name = name
 
+    def set_parent(self, parent: BaseInode):
+        self._parent = parent
+
     async def refresh(self, context: 'Inodes', force=False):
         expired = self._last_loaded is None or \
             time.time() - self._last_loaded > FILE_ATTRIBUTE_CACHE_TTL
@@ -191,7 +194,9 @@ class BaseFileInode(BaseInode):
             return
         child = await self._get_child_by_name(self.name)
         if child is None:
-            raise pyfuse3.FUSEError(errno.ENOENT)
+            child = await self._get_child_by_path(self._path)
+            if child is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
         self._validate(child)
         self._updated = child
         self._updated_name = None
@@ -227,10 +232,7 @@ class BaseFileInode(BaseInode):
 
     @property
     def _path(self) -> str:
-        try:
-            return self._latest.osf_path
-        except AttributeError:
-            return self._latest.path
+        return self._get_path(self._latest)
 
     @property
     def path(self):
@@ -252,10 +254,23 @@ class BaseFileInode(BaseInode):
     def _is_new_file(self) -> bool:
         raise NotImplementedError
 
+    def _get_path(self, object: Any) -> str:
+        try:
+            return object.osf_path
+        except AttributeError:
+            return object.path
+
     async def _get_child_by_name(self, name: str) -> Optional[Union[File, Folder]]:
         async for child in self._parent.object.children:
-            log.debug(f'searching({name})... child: {child}, name: {child.name}')
+            log.debug(f'searching({name})... child: {child}, name: {child.name}, path: {child.path}')
             if child.name == name:
+                return child
+        return None
+
+    async def _get_child_by_path(self, path: str) -> Optional[Union[File, Folder]]:
+        async for child in self._parent.object.children:
+            log.debug(f'searching({path})... child: {child}, name: {child.name}, path: {child.path}')
+            if self._get_path(child) == path:
                 return child
         return None
 
@@ -411,11 +426,11 @@ class Inodes:
         self.osfproject = await self.osf.project(self.project)
         return self.osfproject
 
-    def register(self, parent_inode: BaseInode, name: str):
+    async def register(self, parent_inode: BaseInode, name: str):
         """Register new inode."""
         log.debug(f'register: path={parent_inode}, name={name}')
         newfile = NewFile(parent_inode, name)
-        inode = self._get_object_inode(parent_inode, newfile)
+        inode = await self._get_object_inode(parent_inode, newfile)
         log.debug(f'registered: inode={inode}')
         return inode
 
@@ -450,22 +465,28 @@ class Inodes:
         if cache is not None:
             # Use cache
             for child in cache.children:
+                # Refresh child attributes for cached objects - occasionally they may be out of date
+                try:
+                    await child.refresh(self)
+                except:
+                    log.warning(f'Failed to refresh: {child}', exc_info=True)
+                    continue
                 if child.name == name:
                     return child
         # Request to GRDM
         found = None
         children: List[BaseInode] = []
         async for child in self.get_children_of(parent):
-            children.append(self._get_object_inode(parent, child))
+            children.append(await self._get_object_inode(parent, child))
             log.debug(f'find_by_name: name={name}, child={child.name}')
             if child.name == name:
                 found = child
         cache = ChildRelation(parent, children)
         self._child_relations.set(parent.id, cache)
         if found is not None:
-            return self._get_object_inode(parent, found)
+            return await self._get_object_inode(parent, found)
         # Find from new files
-        return self._find_new_file_by_name(parent, name)
+        return await self._find_new_file_by_name(parent, name)
 
     async def get_children_of(self, parent: BaseInode) -> AsyncGenerator[Union[Storage, File, Folder], None]:
         """Get children of the parent inode."""
@@ -480,7 +501,7 @@ class Inodes:
         async for child in parent.object.children:
             yield child
 
-    def _get_object_inode(self, parent: BaseInode, object: Union[Storage, File, Folder]) -> BaseInode:
+    async def _get_object_inode(self, parent: BaseInode, object: Union[Storage, File, Folder]) -> BaseInode:
         """Get inode for the object."""
         dummy_inode = self._create_object_inode(self.INODE_DUMMY, parent, object)
         for inode in self._inodes.values():
@@ -488,7 +509,7 @@ class Inodes:
                 continue
             if inode.path == dummy_inode.path:
                 return inode
-        new_file_inode = self._find_new_file_by_name(parent, dummy_inode.name)
+        new_file_inode = await self._find_new_file_by_name(parent, dummy_inode.name)
         if new_file_inode is not None:
             return new_file_inode
         # Register new inode
@@ -511,7 +532,7 @@ class Inodes:
             return FolderInode(inode_num, parent, object)
         return FileInode(inode_num, parent, object)
 
-    def _find_new_file_by_name(self, parent: BaseInode, name: str) -> Optional[BaseInode]:
+    async def _find_new_file_by_name(self, parent: BaseInode, name: str) -> Optional[BaseInode]:
         """Find new file by name."""
         for inode in self._inodes.values():
             if inode.removed:
@@ -521,5 +542,10 @@ class Inodes:
             if inode.parent != parent:
                 continue
             if inode._is_new_file and inode.name == name:
+                # Refresh child attributes for cached objects - occasionally they may be out of date
+                try:
+                    await inode.refresh(self)
+                except:
+                    log.debug(f'Failed to refresh: {inode}', exc_info=True)
                 return inode
         return None

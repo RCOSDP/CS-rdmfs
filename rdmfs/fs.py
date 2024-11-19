@@ -175,7 +175,7 @@ class RDMFileSystem(pyfuse3.Operations):
                 raise pyfuse3.FUSEError(errno.EACCES)
             if not parent_inode.can_create:
                 raise pyfuse3.FUSEError(errno.EACCES)
-            inode = self.inodes.register(parent_inode, sname)
+            inode = await self.inodes.register(parent_inode, sname)
             entry = pyfuse3.EntryAttributes()
             entry.st_mode = (stat.S_IFREG | 0o644)
             entry.st_size = 0
@@ -342,6 +342,7 @@ class RDMFileSystem(pyfuse3.Operations):
                 raise pyfuse3.FUSEError(errno.EACCES)
             if not parent_inode_new.can_create:
                 raise pyfuse3.FUSEError(errno.EACCES)
+            await target_old.refresh(self.inodes, force=True)
             target_old_obj = target_old.object
             storage_new = parent_inode_new.storage.object
             store_new = parent_inode_new.object
@@ -352,6 +353,7 @@ class RDMFileSystem(pyfuse3.Operations):
                     await target_old_obj.move_to(storage_new, store_new, to_filename=sname_new)
             else:
                 await target_old_obj.move_to(storage_new, store_new)
+            target_old.set_parent(parent_inode_new)
             log.info('move: src={}, dest={}, destname={}'.format(
                 target_old, store_new, sname_new
             ))

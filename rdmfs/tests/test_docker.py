@@ -122,22 +122,21 @@ def test_docker(docker_container, rdm_storage):
     assert exit_code == 0
 
     # move file to folder
-    # path_1 = f"/mnt/test/{rdm_storage}/{file_name_1}"
-    # path_2 = f"/mnt/test/{rdm_storage}/{dir_name_1}/{dir_name_1_2}/"
-    # exit_code, output = docker_container.exec_run(f"mv {path_1} {path_2}")
-    # assert exit_code == 0
-    # exit_code, output = docker_container.exec_run(f"ls /mnt/test/{rdm_storage}/")
-    # output = output.decode("utf-8").strip()
-    # output_lines = output.splitlines()
-    # assert file_name_1 not in output_lines
-    # exit_code, output = docker_container.exec_run(f"ls /mnt/test/{rdm_storage}/{dir_name_1}/{dir_name_1_2}")
-    # output = output.decode("utf-8").strip()
-    # output_lines = output.splitlines()
-    #TODO assert AssertionError: assert 'File-1.txt' in []
-    #assert file_name_1 in output_lines
+    path_1 = f"/mnt/test/{rdm_storage}/{file_name_1}"
+    path_2 = f"/mnt/test/{rdm_storage}/{dir_name_1}/{dir_name_1_2}/"
+    exit_code, output = docker_container.exec_run(f"mv {path_1} {path_2}")
+    assert exit_code == 0
+    exit_code, output = docker_container.exec_run(f"ls /mnt/test/{rdm_storage}/")
+    output = output.decode("utf-8").strip()
+    output_lines = output.splitlines()
+    assert file_name_1 not in output_lines
+    exit_code, output = docker_container.exec_run(f"ls /mnt/test/{rdm_storage}/{dir_name_1}/{dir_name_1_2}")
+    output = output.decode("utf-8").strip()
+    output_lines = output.splitlines()
+    assert file_name_1 in output_lines
 
     # delete files
-    exit_code, output = docker_container.exec_run(f"rm /mnt/test/{rdm_storage}/{file_name_1}")
+    exit_code, output = docker_container.exec_run(f"rm /mnt/test/{rdm_storage}/{dir_name_1}/{dir_name_1_2}/{file_name_1}")
     assert exit_code == 0
     exit_code, output = docker_container.exec_run(f"ls /mnt/test/{rdm_storage}/")
     output = output.decode("utf-8").strip()
