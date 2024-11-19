@@ -8,8 +8,10 @@ def rdm_storage():
 @pytest.fixture
 def docker_container():
     # 引数からパラメータを取得
-    rdm_node_id = os.getenv("RDM_NODE_ID", "rdm_node_id")
-    rdm_token = os.getenv("RDM_TOKEN", "rdm_token")
+    rdm_node_id = os.getenv("RDM_NODE_ID", "")
+    rdm_token = os.getenv("RDM_TOKEN", "")
+    if not rdm_node_id or not rdm_token:
+        raise ValueError("RDM_NODE_ID and RDM_TOKEN must be set as secrets.")
 
     # Dockerクライアントを作成
     client = docker.from_env()
