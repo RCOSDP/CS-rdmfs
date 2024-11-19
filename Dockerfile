@@ -1,4 +1,5 @@
-FROM python:3.11-bookworm
+ARG BASE_IMAGE=python:3.13-bookworm
+FROM $BASE_IMAGE
 
 RUN apt-get update \
     && apt-get install -y fuse3 libfuse3-dev pkg-config git xattr \

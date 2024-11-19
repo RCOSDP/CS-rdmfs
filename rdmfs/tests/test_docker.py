@@ -54,8 +54,7 @@ def test_docker(docker_container, rdm_storage):
     exit_code, output = docker_container.exec_run(f"rm /mnt/test/{rdm_storage}/{file_name_3}")
     assert exit_code == 0
     exit_code, output = docker_container.exec_run(f"touch /mnt/test/{rdm_storage}/{file_name_3}")
-    #TODO assert 1 == 0
-    #assert exit_code == 0
+    assert exit_code == 0
 
     # write text to file
     file_content_1 = "123ABCあいう亜伊宇"

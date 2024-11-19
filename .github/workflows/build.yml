@@ -35,11 +35,13 @@ jobs:
           sudo apt-get install -y fuse3 libfuse3-dev
           pip install .[dev]
       - name: Build Docker image
-        run: docker build -t rcosdp/cs-rdmfs .
+        run: docker build --build-arg BASE_IMAGE=$BASE_IMAGE -t rcosdp/cs-rdmfs .
+        env:
+          BASE_IMAGE: "python:${{ matrix.python-version }}-bookworm"
       - name: Run tests
         env:
           RDM_NODE_ID: ${{ secrets.RDM_NODE_ID }}
           RDM_TOKEN: ${{ secrets.RDM_TOKEN }}
-          RDM_STORAGE: ${{ secrets.RDM_STORAGE }}
+          RDM_STORAGE: ${{ secrets.RDM_STORAGE || 'osfstorage' }}
         run: |
           pytest --cov

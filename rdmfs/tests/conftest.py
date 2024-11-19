@@ -7,24 +7,22 @@ def rdm_storage():
 
 @pytest.fixture
 def docker_container():
-    # 引数からパラメータを取得
+    # Retrieve RDM_NODE_ID and RDM_TOKEN from environment variables
     rdm_node_id = os.getenv("RDM_NODE_ID", "")
     rdm_token = os.getenv("RDM_TOKEN", "")
     if not rdm_node_id or not rdm_token:
         raise ValueError("RDM_NODE_ID and RDM_TOKEN must be set as secrets.")
 
-    # Dockerクライアントを作成
+    # Create a Docker container
     client = docker.from_env()
-    
-    # Dockerコンテナを起動
     container = client.containers.run(
-        "rcosdp/cs-rdmfs",  # 使用するDockerイメージを指定
+        "rcosdp/cs-rdmfs",
         name="rdmfs",
         detach=True,
         tty=True,
         remove=True,
         privileged=True,
-        auto_remove=True,  # コンテナ停止後に自動削除
+        auto_remove=True,
         environment={
             "RDM_NODE_ID": rdm_node_id,
             "RDM_TOKEN": rdm_token,
@@ -35,8 +33,8 @@ def docker_container():
             f"{os.getcwd()}/mnt": {'bind': '/mnt', 'mode': 'rw'}
         }
     )
-    
-    # 特定のログメッセージが現れるまで待機
+
+    # Wait for the container to start
     message_to_wait_for = "[pyfuse3] pyfuse-02: No tasks waiting, starting another worker"
     timeout = 30
 
