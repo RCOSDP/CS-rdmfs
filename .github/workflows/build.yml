@@ -1,0 +1,47 @@
+name: Build RDMFS and run tests
+
+on:
+  push:
+    tags:
+      - '**'
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      # You can test your matrix by printing the current Python version
+      - name: Display Python version
+        run: python -c "import sys; print(sys.version)"
+      - name: Install RDMFS
+        run: |
+          sudo apt-get install -y fuse3 libfuse3-dev
+          pip install .[dev]
+      - name: Build Docker image
+        run: docker build --build-arg BASE_IMAGE=$BASE_IMAGE -t rcosdp/cs-rdmfs .
+        env:
+          BASE_IMAGE: "python:${{ matrix.python-version }}-bookworm"
+      - name: Run tests
+        env:
+          RDM_NODE_ID: ${{ secrets.RDM_NODE_ID }}
+          RDM_TOKEN: ${{ secrets.RDM_TOKEN }}
+          RDM_STORAGE: ${{ secrets.RDM_STORAGE || 'osfstorage' }}
+        run: |
+          pytest --cov

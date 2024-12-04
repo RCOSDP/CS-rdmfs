@@ -1,12 +1,14 @@
-import io
 import logging
 import os
-import tempfile
 import pyfuse3
 from aiofile import AIOFile, Reader
+import aiofiles
+from osfclient.models import File
+from .inode import BaseInode, NewFile
 
 
 log = logging.getLogger(__name__)
+
 
 def flags_can_write(flags):
     if flags & 0x03 == os.O_RDWR:
@@ -15,9 +17,11 @@ def flags_can_write(flags):
         return True
     return False
 
-class BaseFileContext:
-    def __init__(self, context, flags=None):
+
+class FileContext:
+    def __init__(self, context, inode: BaseInode, flags=None):
         self.context = context
+        self.inode = inode
         self.current_id = None
         self.aiterator = None
         self.buffer = None
@@ -26,19 +30,33 @@ class BaseFileContext:
         self.flush_count = 0
 
     async def _flush(self, fp):
-        raise NotImplementedError()
+        if isinstance(self.inode.object, File):
+            await self.inode.object.update(fp)
+            return
+        storage = self.inode.storage
+        if not self.inode.display_path.startswith(storage.display_path):
+            raise ValueError('Storage path {0} does not start with {1}'.format(
+                self.inode.display_path, storage.display_path
+            ))
+        relative_path = self.inode.display_path[len(storage.display_path):]
+        log.debug('flush: storage={storage}, path={path}'.format(
+            storage=storage, path=relative_path
+        ))
+        await storage.object.create_file(relative_path, fp)
 
     async def _write_to(self, fp):
-        raise NotImplementedError()
+        if isinstance(self.inode.object, NewFile):
+            return
+        await self.inode.object.write_to(fp)
 
     async def _invalidate(self):
-        pass
+        self.context.inodes.invalidate(self.inode)
 
     def is_write(self):
         return flags_can_write(self.flags)
 
     def is_new_file(self):
-        return False
+        return isinstance(self.inode.object, NewFile)
 
     async def close(self):
         if self.buffer is None and self.is_new_file() and self.is_write():
@@ -82,21 +100,22 @@ class BaseFileContext:
         self.current_id += 1
         try:
             object = await self.aiterator.__anext__()
-            inode = self.get_inode(object)
-            log.info('Result: name={}, inode={}'.format(object.name, inode))
+            log.debug('Result: name={}, inode={}'.format(object.name, self.inode))
+            child_inode = await self.context.inodes.find_by_name(self.inode, object.name)
+            log.info('Result: name={}, inode={}, child={}'.format(object.name, self.inode, child_inode))
             pyfuse3.readdir_reply(
                 token, object.name.encode('utf8'),
-                await self.context.getattr(inode),
+                await self.context.getattr(child_inode.id),
                 self.current_id)
         except StopAsyncIteration:
-            log.info('Finished')
+            log.info('Finished, inode={}'.format(self.inode))
             return None
 
     async def _ensure_buffer(self):
         if self.bufferfile is not None:
             return self.bufferfile
         if self.buffer is None:
-            with tempfile.NamedTemporaryFile(delete=False) as f:
+            async with aiofiles.tempfile.NamedTemporaryFile(delete=False) as f:
                 await self._write_to(f)
                 self.buffer = f.name
         mode = 'rb'
@@ -116,70 +135,11 @@ class BaseFileContext:
         self.bufferfile = open(self.buffer, mode)
         return self.bufferfile
 
-class Project(BaseFileContext):
-    def __init__(self, context, osfproject):
-        super(Project, self).__init__(context)
-        self.osfproject = osfproject
-
-    def __aiter__(self):
-        return self.osfproject.storages.__aiter__()
-
-    def get_inode(self, storage):
-        return self.context.inodes.get_storage_inode(storage)
-
-class Folder(BaseFileContext):
-    def __init__(self, context, storage, folder):
-        super(Folder, self).__init__(context)
-        self.storage = storage
-        self.folder = folder
-
     def __aiter__(self):
         return self._get_folders_and_files().__aiter__()
 
-    def get_inode(self, file):
-        return self.context.inodes.get_file_inode(self.storage, file)
-
     async def _get_folders_and_files(self):
-        if self.storage == self.folder:
-            async for f in self.storage.child_folders:
-                yield f
-            async for f in self.storage.child_files:
-                yield f
-        else:
-            async for f in self.folder.folders:
-                yield f
-            async for f in self.folder.files:
-                yield f
-
-class File(BaseFileContext):
-    def __init__(self, context, storage, file_, flags):
-        super(File, self).__init__(context, flags)
-        self.storage = storage
-        self.file_ = file_
-
-    async def _write_to(self, fp):
-        await self.file_.write_to(fp)
-
-    async def _flush(self, fp):
-        await self.file_.update(fp)
-
-    async def _invalidate(self):
-        self.context.inodes.clear_inode_cache(self.storage, self.file_.path)
-
-class NewFile(BaseFileContext):
-    def __init__(self, context, storage, path, flags):
-        super(NewFile, self).__init__(context, flags)
-        self.storage = storage
-        self.path = path
-
-    def is_new_file(self):
-        return True
-
-    async def _write_to(self, fp):
-        pass
-
-    async def _flush(self, fp):
-        await self.storage.create_file(self.path, fp)
-
-    async def _invalidate(self):
-        self.context.inodes.clear_inode_cache(self.storage, '/' + self.path)
+        if not self.inode.has_children():
+            raise ValueError(f'File {self.inode.display_path} has no children')
+        async for f in self.context.inodes.get_children_of(self.inode):
+            yield f

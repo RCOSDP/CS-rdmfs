@@ -1,4 +1,4 @@
 pyfuse3
--e git+https://github.com/RCOSDP/rdmclient.git@async#egg=osfclient
+osfclient @ git+https://github.com/RCOSDP/rdmclient.git
 cacheout
 aiofile

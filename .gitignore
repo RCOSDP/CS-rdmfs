@@ -1,1 +1,7 @@
 sample.txt
+.python-version
+
+.coverage
+
+*.egg-info
+__pycache__

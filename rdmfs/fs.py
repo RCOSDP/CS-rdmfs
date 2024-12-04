@@ -1,24 +1,24 @@
 from datetime import datetime
-import json
 import os
-import sys
 import stat
 import logging
 import errno
-import time
-import traceback
+from typing import Optional
+
 import pyfuse3
-import pyfuse3_asyncio
 from osfclient import exceptions as osf_exceptions
-from . import node
+from .node import FileContext, flags_can_write
 from .inode import Inodes, fromisoformat
 from .filehandle import FileHandlers
+from .exception import reraise_fuse_error
+from .whitelist import Whitelist
 
 log = logging.getLogger(__name__)
 
 class RDMFileSystem(pyfuse3.Operations):
     def __init__(self, osf, project, dir_mode=0o755, file_mode=0o644,
-                 uid=None, gid=None, writable_whitelist=None):
+                 uid=None, gid=None,
+                 writable_whitelist: Optional[Whitelist]=None):
         super(RDMFileSystem, self).__init__()
         self.inodes = Inodes(osf, project)
         self.file_handlers = FileHandlers()
@@ -28,113 +28,92 @@ class RDMFileSystem(pyfuse3.Operations):
         self.gid = gid or os.getgid()
         self.writable_whitelist = writable_whitelist
 
-    async def getattr(self, inode, ctx=None):
+    async def getattr(self, inode_num, ctx=None):
+        log.info('getattr: inode={inode}'.format(inode=inode_num))
         try:
-            log.info('getattr: inode={inode}'.format(inode=inode))
             entry = pyfuse3.EntryAttributes()
-            storage, store = await self.inodes.find_by_inode(inode, allow_dummy=True)
-            await self._validate_store(storage, store)
-            if hasattr(store, 'files') or hasattr(store, 'storages'):
+            inode = await self.inodes.get(inode_num)
+            if inode is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
+            await inode.refresh(self.inodes)
+            if inode.has_children():
                 entry.st_mode = (stat.S_IFDIR | self.dir_mode)
                 entry.st_size = 0
             else:
                 entry.st_mode = (stat.S_IFREG | self.file_mode)
-                log.info('getattr: name={}, size={}'.format(store.name, store.size))
-                if store.size is not None:
-                    entry.st_size = int(store.size)
+                log.debug('getattr: name={}, size={}'.format(inode.name, inode.size))
+                if inode.size is not None:
+                    entry.st_size = int(inode.size)
                 else:
                     entry.st_size = 0
             if self.writable_whitelist is not None and \
-                not self.writable_whitelist.includes(storage, store):
+                not self.writable_whitelist.includes(inode):
                 entry.st_mode = entry.st_mode & (~0o200)
             stamp = 0
             mstamp = stamp
-            if hasattr(store, 'date_created') and store.date_created is not None:
-                stamp = fromisoformat(store.date_created)
-            if hasattr(store, 'date_modified') and store.date_modified is not None:
-                mstamp = fromisoformat(store.date_modified)
+            if inode.date_created is not None:
+                stamp = fromisoformat(inode.date_created)
+            if inode.date_modified is not None:
+                mstamp = fromisoformat(inode.date_modified)
             entry.st_atime_ns = stamp
             entry.st_ctime_ns = stamp
-            entry.st_mtime_ns = stamp
+            entry.st_mtime_ns = mstamp
             entry.st_gid = self.gid
             entry.st_uid = self.uid
-            entry.st_ino = inode
+            entry.st_ino = inode.id
             entry.entry_timeout = 5
             entry.attr_timeout = 5
+            log.debug('getattr: inode={}, result={}'.format(inode, entry))
             return entry
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
-    async def setattr(self, inode, attr, fields, fh, ctx=None):
+    async def setattr(self, inode_num, attr, fields, fh, ctx=None):
+        log.info('setattr: inode={inode}, attr={attr}, fh={fh}'.format(
+            inode=inode_num, attr=attr, fh=fh
+        ))
         try:
-            log.info('setattr: inode={inode}, attr={attr}, fh={fh}'.format(
-                inode=inode, attr=attr, fh=fh
-            ))
-            log.info('not supported')
-            return await self.getattr(inode)
+            log.warning('setattr not supported')
+            return await self.getattr(inode_num)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
-    async def lookup(self, parent_inode, bname, ctx=None):
+    async def lookup(self, parent_inode_num, bname, ctx=None):
+        name = bname.decode('utf8')
+        log.info('lookup parent_inode={parent_inode}, name={name}'.format(
+            parent_inode=parent_inode_num, name=name
+        ))
         try:
-            name = bname.decode('utf8')
-            log.info('lookup parent_inode={parent_inode}, name={name}'.format(
-                parent_inode=parent_inode, name=name
-            ))
-            if parent_inode == pyfuse3.ROOT_INODE:
-                # Storages
-                osfproject = await self.inodes.get_osfproject()
-                storage = None
-                async for s in osfproject.storages:
-                    if s.name == name:
-                        storage = s
-                if storage is None:
-                    raise pyfuse3.FUSEError(errno.ENOENT)
-                inode = self.inodes.get_storage_inode(storage)
-                return await self.getattr(inode)
-            # Files
-            storage, store = await self.inodes.find_by_inode(parent_inode)
-            if store is None:
+            parent_inode = await self.inodes.get(parent_inode_num)
+            if parent_inode is None:
                 raise pyfuse3.FUSEError(errno.ENOENT)
-            if not hasattr(store, 'files'):
+            log.debug('lookup: parent_inode_obj={}'.format(parent_inode))
+            inode = await self.inodes.find_by_name(parent_inode, name)
+            if inode is None:
                 raise pyfuse3.FUSEError(errno.ENOENT)
-            target = None
-            async for file_ in self.inodes.get_files(store):
-                if file_.name == name:
-                    target = file_
-            if target is None:
-                raise pyfuse3.FUSEError(errno.ENOENT)
-            inode = self.inodes.get_file_inode(storage, target)
-            return await self.getattr(inode)
+            return await self.getattr(inode.id)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
-    async def opendir(self, inode, ctx):
-        log.info('opendir: inode={inode}'.format(inode=inode))
+    async def opendir(self, inode_num, ctx):
+        log.info('opendir: inode={inode}'.format(inode=inode_num))
         try:
-            if inode == pyfuse3.ROOT_INODE:
-                osfproject = await self.inodes.get_osfproject()
-                return self.file_handlers.get_node_fh(node.Project(self, osfproject))
-            if self.inodes.exists(inode):
-                storage, store = await self.inodes.find_by_inode(inode)
-                await self._validate_store(storage, store)
-                log.info('find_by_inode: storage={}, folder={}'.format(storage, store))
-                return self.file_handlers.get_node_fh(node.Folder(self, storage, store))
-            raise pyfuse3.FUSEError(errno.ENOENT)
+            inode = await self.inodes.get(inode_num)
+            log.debug('opendir: inode_obj={}'.format(inode))
+            if inode is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
+            await inode.refresh(self.inodes)
+            return self.file_handlers.get_node_fh(FileContext(self, inode))
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
     async def readdir(self, fh, start_id, token):
         log.info('readdir: fh={fh}, start_id={start_id}'.format(
@@ -146,14 +125,15 @@ class RDMFileSystem(pyfuse3.Operations):
             await folder.readdir(start_id, token)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
         return
 
-    async def setxattr(self, inode, name, value, ctx):
-        log.info('setxattr')
-        if inode != pyfuse3.ROOT_INODE or name != b'command':
+    async def setxattr(self, inode_num, name, value, ctx):
+        log.info('setxattr: inode={inode}, name={name}, value={value}'.format(
+            inode=inode_num, name=name, value=value
+        ))
+        if inode_num != pyfuse3.ROOT_INODE or name != b'command':
             raise pyfuse3.FUSEError(errno.ENOTSUP)
 
         if value == b'terminate':
@@ -161,41 +141,41 @@ class RDMFileSystem(pyfuse3.Operations):
         else:
             raise pyfuse3.FUSEError(errno.EINVAL)
 
-    async def open(self, inode, flags, ctx):
+    async def open(self, inode_num, flags, ctx):
+        log.info('open: inode={inode}, flags={flags}'.format(inode=inode_num, flags=flags))
         try:
-            log.info('open: inode={inode}, flags={flags}'.format(inode=inode, flags=flags))
-            if not self.inodes.exists(inode):
+            inode = await self.inodes.get(inode_num)
+            if inode is None:
                 raise pyfuse3.FUSEError(errno.ENOENT)
-            storage, store = await self.inodes.find_by_inode(inode)
-            await self._validate_store(storage, store)
-            if node.flags_can_write(flags) and \
+            if flags_can_write(flags) and \
                 self.writable_whitelist is not None and \
-                not self.writable_whitelist.includes(storage, store):
+                not self.writable_whitelist.includes(inode):
                 raise pyfuse3.FUSEError(errno.EACCES)
-
+            await inode.refresh(self.inodes)
             return pyfuse3.FileInfo(fh=self.file_handlers.get_node_fh(
-                node.File(self, storage, store, flags)
+                FileContext(self, inode, flags)
             ))
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
-    async def create(self, parent_inode, name, mode, flags, ctx):
+    async def create(self, parent_inode_num, name, mode, flags, ctx):
+        sname = name.decode('utf8')
+        log.info('create: parent_inode={inode} name={sname}'.format(
+            inode=parent_inode_num, sname=sname
+        ))
         try:
-            sname = name.decode('utf8')
-            log.info('create: parent_inode={inode} name={sname}'.format(
-                inode=parent_inode, sname=sname
-            ))
-            storage, store = await self.inodes.find_by_inode(parent_inode)
-            log.info('create: parent_path={}'.format(store.path))
+            parent_inode = await self.inodes.get(parent_inode_num)
+            if parent_inode is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
+            log.info('create: parent_path={}'.format(parent_inode.path))
             if self.writable_whitelist is not None and \
-                not self.writable_whitelist.includes(storage, store, sname):
+                not self.writable_whitelist.includes(parent_inode, sname):
                 raise pyfuse3.FUSEError(errno.EACCES)
-
-            newpath = os.path.join(store.path.lstrip('/'), sname)
-
+            if not parent_inode.can_create:
+                raise pyfuse3.FUSEError(errno.EACCES)
+            inode = await self.inodes.register(parent_inode, sname)
             entry = pyfuse3.EntryAttributes()
             entry.st_mode = (stat.S_IFREG | 0o644)
             entry.st_size = 0
@@ -203,207 +183,209 @@ class RDMFileSystem(pyfuse3.Operations):
             mstamp = stamp
             entry.st_atime_ns = stamp
             entry.st_ctime_ns = stamp
-            entry.st_mtime_ns = stamp
+            entry.st_mtime_ns = mstamp
             entry.st_gid = os.getgid()
             entry.st_uid = os.getuid()
-            entry.st_ino = self.inodes.register_temp_inode(storage, store.path, sname)
+            entry.st_ino = inode.id
             entry.entry_timeout = 5
             entry.attr_timeout = 5
 
             return (
                 pyfuse3.FileInfo(fh=self.file_handlers.get_node_fh(
-                    node.NewFile(self, storage, newpath, flags)
+                    FileContext(self, inode, flags)
                 )),
                 entry
             )
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
     async def read(self, fh, off, size):
+        log.info('read: fh={fh}, off={off}, size={size}'.format(
+            fh=fh, off=off, size=size
+        ))
         try:
-            log.info('read: fh={fh}, off={off}, size={size}'.format(
-                fh=fh, off=off, size=size
-            ))
             file_ = self.file_handlers.find_node_by_fh(fh)
             assert file_ is not None
             return await file_.read(off, size)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
     async def write(self, fh, off, buf):
+        log.info('write: fh={fh}, off={off}'.format(fh=fh, off=off))
         try:
-            log.info('write: fh={fh}, off={off}'.format(fh=fh, off=off))
             file_ = self.file_handlers.find_node_by_fh(fh)
             assert file_ is not None
             return await file_.write(off, buf)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
     async def flush(self, fh):
+        log.info('flush: fh={fh}'.format(fh=fh))
         try:
-            log.info('flush: fh={fh}'.format(fh=fh))
             file_ = self.file_handlers.find_node_by_fh(fh)
             assert file_ is not None
             await file_.flush()
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
     async def release(self, fh):
+        log.info('release: fh={fh}'.format(fh=fh))
         try:
-            log.info('release')
             file_ = self.file_handlers.find_node_by_fh(fh)
             assert file_ is not None
             await file_.close()
             self.file_handlers.release_fh(fh)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
     async def releasedir(self, fh):
+        log.info('releasedir: fh={fh}'.format(fh=fh))
         try:
-            log.info('releasedir')
             file_ = self.file_handlers.find_node_by_fh(fh)
             assert file_ is not None
             await file_.close()
             self.file_handlers.release_fh(fh)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
-    async def mkdir(self, parent_inode, name, mode, ctx):
+    async def mkdir(self, parent_inode_num, name, mode, ctx):
+        log.info('mkdir: parent_inode={inode}, name={name}'.format(
+            inode=parent_inode_num, name=name
+        ))
         try:
-            storage, store = await self.inodes.find_by_inode(parent_inode)
-            if storage is None:
-                # root inode
-                raise pyfuse3.FUSEError(errno.ENOSYS)
+            inode = await self.inodes.get(parent_inode_num)
+            if inode is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
             sname = name.decode('utf8')
             if self.writable_whitelist is not None and \
-                not self.writable_whitelist.includes(storage, store, sname + '/'):
+                not self.writable_whitelist.includes(inode, sname + '/'):
                 raise pyfuse3.FUSEError(errno.EACCES)
-            new_folder = await store.create_folder(sname)
-            new_attr = await self.lookup(parent_inode, name)
+            if not inode.can_create:
+                raise pyfuse3.FUSEError(errno.EACCES)
+            new_folder = await inode.object.create_folder(sname)
+            new_attr = await self.lookup(parent_inode_num, name)
             log.info('mkdir: folder={}, attr={}'.format(new_folder, new_attr))
             return new_attr
         except osf_exceptions.FolderExistsException:
             raise pyfuse3.FUSEError(errno.EEXIST)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
-    async def rmdir(self, parent_inode, name, ctx):
+    async def rmdir(self, parent_inode_num, name, ctx):
+        log.info('rmdir: parent_inode={inode}, name={name}'.format(
+            inode=parent_inode_num, name=name
+        ))
         try:
-            storage, store = await self.inodes.find_by_inode(parent_inode)
-            if storage is None:
-                # root inode
-                raise pyfuse3.FUSEError(errno.ENOSYS)
+            parent_inode = await self.inodes.get(parent_inode_num)
+            if parent_inode is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
             target = None
             sname = name.decode('utf8')
             if self.writable_whitelist is not None and \
-                not self.writable_whitelist.includes(storage, store, sname + '/'):
+                not self.writable_whitelist.includes(parent_inode, sname + '/'):
                 raise pyfuse3.FUSEError(errno.EACCES)
-            async for file_ in self.inodes.get_files(store):
-                if file_.name == sname:
-                    target = file_
+            target = await self.inodes.find_by_name(parent_inode, sname)
             if target is None:
                 raise pyfuse3.FUSEError(errno.ENOENT)
-            if not hasattr(target, 'files'):
+            if not target.has_children():
                 log.info('attempt to rmdir file: {}'.format(target))
                 raise pyfuse3.FUSEError(errno.ENOTDIR)
-            async for _ in self.inodes.get_files(target):
+            async for _ in self.inodes.get_children_of(target):
                 raise pyfuse3.FUSEError(errno.ENOTEMPTY)
             log.info('rmdir: folder={}'.format(target))
-            await target.remove()
-            self.inodes.invalidate_inode(storage, target.path)
+            await target.object.remove()
+            target.remove()
+            self.inodes.invalidate(parent_inode)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
-    async def rename(self, parent_inode_old, name_old, parent_inode_new, name_new, flags, ctx):
+    async def rename(self, parent_inode_old_num, name_old, parent_inode_new_num, name_new, flags, ctx):
+        log.info('rename: parent_inode_old={inode_old}, name_old={name_old}, parent_inode_new={inode_new}, name_new={name_new}'.format(
+            inode_old=parent_inode_old_num, name_old=name_old, inode_new=parent_inode_new_num, name_new=name_new
+        ))
         try:
-            storage_old, store_old = await self.inodes.find_by_inode(parent_inode_old)
-            if storage_old is None:
-                # root inode
-                raise pyfuse3.FUSEError(errno.ENOSYS)
-            storage_new, store_new = await self.inodes.find_by_inode(parent_inode_new)
-            if storage_new is None:
-                # root inode
-                raise pyfuse3.FUSEError(errno.ENOSYS)
+            parent_inode_old = await self.inodes.get(parent_inode_old_num)
+            if parent_inode_old is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
+            parent_inode_new = await self.inodes.get(parent_inode_new_num)
+            if parent_inode_new is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
             target_old = None
             sname_old = name_old.decode('utf8')
-            async for file_ in self.inodes.get_files(store_old):
-                if file_.name == sname_old:
-                    target_old = file_
+            target_old = await self.inodes.find_by_name(parent_inode_old, sname_old)
             if target_old is None:
                 raise pyfuse3.FUSEError(errno.ENOENT)
             sname_new = name_new.decode('utf8')
             if self.writable_whitelist is not None and \
-                not self.writable_whitelist.includes(storage_old, store_old, sname_old):
+                not self.writable_whitelist.includes(parent_inode_old, sname_old):
                 raise pyfuse3.FUSEError(errno.EACCES)
             if self.writable_whitelist is not None and \
-                not self.writable_whitelist.includes(storage_new, store_new, sname_new):
+                not self.writable_whitelist.includes(parent_inode_new, sname_new):
                 raise pyfuse3.FUSEError(errno.EACCES)
+            if not target_old.can_move:
+                raise pyfuse3.FUSEError(errno.EACCES)
+            if not parent_inode_new.can_create:
+                raise pyfuse3.FUSEError(errno.EACCES)
+            await target_old.refresh(self.inodes, force=True)
+            target_old_obj = target_old.object
+            storage_new = parent_inode_new.storage.object
+            store_new = parent_inode_new.object
             if sname_old != sname_new:
-                if hasattr(target_old, 'files'):
-                    await target_old.move_to(storage_new, store_new, to_foldername=sname_new)
+                if target_old.has_children():
+                    await target_old_obj.move_to(storage_new, store_new, to_foldername=sname_new)
                 else:
-                    await target_old.move_to(storage_new, store_new, to_filename=sname_new)
+                    await target_old_obj.move_to(storage_new, store_new, to_filename=sname_new)
             else:
-                await target_old.move_to(storage_new, store_new)
+                await target_old_obj.move_to(storage_new, store_new)
+            target_old.set_parent(parent_inode_new)
             log.info('move: src={}, dest={}, destname={}'.format(
                 target_old, store_new, sname_new
             ))
-            self.inodes.invalidate_inode(storage_old, target_old.path)
-            self.inodes.invalidate_inode(storage_new, os.path.join(store_new.path, sname_new))
+            self.inodes.invalidate(target_old, name=sname_new)
+            self.inodes.invalidate(parent_inode_old)
+            self.inodes.invalidate(parent_inode_new)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
+        except BaseException as e:
+            reraise_fuse_error(e)
 
-    async def unlink(self, parent_inode, name, ctx):
+    async def unlink(self, parent_inode_num, name, ctx):
+        log.info('unlink: parent_inode={inode}, name={name}'.format(
+            inode=parent_inode_num, name=name
+        ))
         try:
-            storage, store = await self.inodes.find_by_inode(parent_inode)
-            if storage is None:
-                # root inode
-                raise pyfuse3.FUSEError(errno.ENOSYS)
-            target = None
+            parent_inode = await self.inodes.get(parent_inode_num)
+            if parent_inode is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
             sname = name.decode('utf8')
             if self.writable_whitelist is not None and \
-                not self.writable_whitelist.includes(storage, store, sname):
+                not self.writable_whitelist.includes(parent_inode, sname):
                 raise pyfuse3.FUSEError(errno.EACCES)
-            async for file_ in self.inodes.get_files(store):
-                if file_.name == sname:
-                    target = file_
+            target = await self.inodes.find_by_name(parent_inode, sname)
             if target is None:
                 raise pyfuse3.FUSEError(errno.ENOENT)
             log.info('unlink: file={}'.format(target))
-            await target.remove()
-            self.inodes.invalidate_inode(storage, target.path)
+            await target.refresh(self.inodes)
+            await target.object.remove()
+            target.remove()
+            self.inodes.invalidate(parent_inode)
         except pyfuse3.FUSEError as e:
             raise e
-        except:
-            traceback.print_exc()
-            raise pyfuse3.FUSEError(errno.EBADF)
-
-    async def _validate_store(self, storage, store):
-        pass
+        except BaseException as e:
+            reraise_fuse_error(e)

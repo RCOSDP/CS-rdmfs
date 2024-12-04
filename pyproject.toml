@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = 'rdmfs'
+description = 'A FUSE library for GakuNin RDM'
+authors = [{name = 'RCOSDP'}]
+license = {file = "LICENSE"}
+dynamic = ['version', 'dependencies']
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["rdmfs"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = "requirements.txt"}
+version = {attr = "rdmfs.__version__"}
+
+[project.entry-points.'console_scripts']
+rdmfs = 'rdmfs.__main__:main'
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pytest-asyncio",
+    "mock",
+    "flake8",
+    "docker",
+]
