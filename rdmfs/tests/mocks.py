@@ -109,6 +109,12 @@ def MockProject(name):
                         return_value=FutureMockStorage('osfstorage'))
     type(mock).storage = storage
     mock._storage_mock = storage
+    project_id = PropertyMock(return_value=name)
+    type(mock).id = project_id
+    mock._id_mock = project_id
+    project_title = PropertyMock(return_value=name)
+    type(mock).title = project_title
+    mock._title_mock = project_title
 
     return mock
 

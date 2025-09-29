@@ -18,9 +18,10 @@ log = logging.getLogger(__name__)
 class RDMFileSystem(pyfuse3.Operations):
     def __init__(self, osf, project, dir_mode=0o755, file_mode=0o644,
                  uid=None, gid=None,
-                 writable_whitelist: Optional[Whitelist]=None):
+                 writable_whitelist: Optional[Whitelist]=None,
+                 list_all_projects: bool=False):
         super(RDMFileSystem, self).__init__()
-        self.inodes = Inodes(osf, project)
+        self.inodes = Inodes(osf, project, list_all_projects=list_all_projects)
         self.file_handlers = FileHandlers()
         self.dir_mode = dir_mode
         self.file_mode = file_mode
@@ -147,6 +148,8 @@ class RDMFileSystem(pyfuse3.Operations):
             inode = await self.inodes.get(inode_num)
             if inode is None:
                 raise pyfuse3.FUSEError(errno.ENOENT)
+            if flags_can_write(flags) and getattr(inode, 'readonly', False):
+                raise pyfuse3.FUSEError(errno.EACCES)
             if flags_can_write(flags) and \
                 self.writable_whitelist is not None and \
                 not self.writable_whitelist.includes(inode):
