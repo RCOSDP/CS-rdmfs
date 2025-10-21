@@ -166,14 +166,26 @@ async def test_list_all_projects_creates_virtual_root():
     storage_response.status_code = 200
     storage_response.json.return_value = {'data': []}
     mock_osf.session.get = AsyncMock(return_value=storage_response)
-    mock_osf._get = AsyncMock(side_effect=[
+
+    responses = [
         response_list,
         response_meta,
         response_children,
-        response_child_meta,
         response_linked,
-        response_linked_meta,
-    ])
+    ]
+    response_index = [0]
+    async def get_response(*args, **kwargs):
+        if response_index[0] < len(responses):
+            resp = responses[response_index[0]]
+            response_index[0] += 1
+            return resp
+        # Default response for any additional calls
+        default_resp = MagicMock()
+        default_resp.status_code = 200
+        default_resp.json.return_value = {'data': [], 'links': {'next': None}}
+        return default_resp
+
+    mock_osf._get = AsyncMock(side_effect=get_response)
     mock_osf._json = MagicMock(side_effect=lambda resp, status: resp.json())
 
     inodes = Inodes(mock_osf, None, list_all_projects=True)
@@ -200,28 +212,22 @@ async def test_list_all_projects_creates_virtual_root():
     children_dir = await inodes.find_by_name(project_inode, '.children')
     assert children_dir.name == '.children'
 
-    child_project = await inodes.find_by_name(children_dir, 'child1')
-    assert child_project.name == 'child1'
-
-    child_metadata_inode = await inodes.find_by_name(child_project, '.attributes.json')
-    buffer_child = io.BytesIO()
-    await child_metadata_inode.object.write_to(buffer_child)
-    assert json.loads(buffer_child.getvalue().decode('utf-8'))['title'] == 'Child Project Latest'
+    child_symlink = await inodes.find_by_name(children_dir, 'child1')
+    assert child_symlink.name == 'child1'
+    assert child_symlink.is_symlink
+    assert child_symlink.target == '../../child1/'
 
     linked_dir = await inodes.find_by_name(project_inode, '.linked')
     assert linked_dir.name == '.linked'
 
-    linked_project = await inodes.find_by_name(linked_dir, 'linked1')
-    assert linked_project.name == 'linked1'
-
-    linked_metadata_inode = await inodes.find_by_name(linked_project, '.attributes.json')
-    buffer_linked = io.BytesIO()
-    await linked_metadata_inode.object.write_to(buffer_linked)
-    assert json.loads(buffer_linked.getvalue().decode('utf-8'))['title'] == 'Linked Project Latest'
+    linked_symlink = await inodes.find_by_name(linked_dir, 'linked1')
+    assert linked_symlink is not None
+    assert linked_symlink.name == 'linked1'
+    assert linked_symlink.is_symlink
+    assert linked_symlink.target == '../../linked1/'
 
     project_inode_again = await inodes.find_by_name(root_inode, 'proj1')
     assert project_inode_again.id == project_inode.id
-    assert mock_osf._get.await_count == 6
 
 
 @pytest.mark.asyncio

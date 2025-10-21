@@ -92,6 +92,10 @@ class BaseInode:
     def can_move(self) -> bool:
         return False
 
+    @property
+    def is_symlink(self) -> bool:
+        return False
+
 
 class ProjectInode(BaseInode):
     """The class for managing single project inode."""
@@ -146,6 +150,14 @@ class ProjectInode(BaseInode):
     def update_metadata(self, metadata: Dict[str, Any]):
         self.metadata = metadata or {}
         setattr(self.project, '_rdmfs_attributes', self.metadata)
+
+    @property
+    def date_created(self) -> Optional[str]:
+        return self.metadata.get('date_created')
+
+    @property
+    def date_modified(self) -> Optional[str]:
+        return self.metadata.get('date_modified')
 
 
 class ProjectAttributesEntry:
@@ -365,6 +377,82 @@ class ProjectLinkedInode(BaseInode):
     @property
     def display_path(self) -> str:
         return f'{self.parent.display_path}{self.name}/'
+
+
+class ProjectSymlinkEntry:
+    """Symlink entry pointing to a child or linked project."""
+
+    def __init__(self, parent_inode: BaseInode, target_project: Project):
+        self.parent_inode = parent_inode
+        self.target_project = target_project
+        self._name = getattr(target_project, 'id', None)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def path(self) -> str:
+        return f'{self.parent_inode.path}{self.name}'
+
+    @property
+    def display_path(self) -> str:
+        return f'{self.parent_inode.display_path}{self.name}'
+
+    @property
+    def target(self) -> str:
+        """Calculate relative path to target project."""
+        target_id = getattr(self.target_project, 'id', None)
+        return f'../../{target_id}/'
+
+
+class SymlinkInode(BaseInode):
+    """Inode representing a symbolic link to a project."""
+
+    def __init__(self, id: int, parent: BaseInode, entry: ProjectSymlinkEntry):
+        super(SymlinkInode, self).__init__(id)
+        self._parent = parent
+        self._entry = entry
+
+    @property
+    def parent(self) -> Optional[BaseInode]:
+        return self._parent
+
+    @property
+    def storage(self):
+        raise ValueError('Symlink inode does not have storage')
+
+    @property
+    def object(self):
+        return self._entry
+
+    @property
+    def name(self) -> str:
+        return self._entry.name
+
+    def has_children(self) -> bool:
+        return False
+
+    @property
+    def path(self) -> str:
+        return self._entry.path
+
+    @property
+    def display_path(self) -> str:
+        return self._entry.display_path
+
+    @property
+    def target(self) -> str:
+        """Return the symlink target path."""
+        return self._entry.target
+
+    @property
+    def is_symlink(self) -> bool:
+        return True
+
+    @property
+    def can_move(self) -> bool:
+        return False
 
 
 class ProjectsRootInode(BaseInode):
@@ -800,25 +888,26 @@ class Inodes:
                 return attrs
 
             yield ProjectAttributesEntry(parent, fetch_metadata, initial_attributes)
-            yield ProjectChildrenEntry(parent)
-            yield ProjectLinkedEntry(parent)
+            if self.list_all_projects:
+                yield ProjectChildrenEntry(parent)
+                yield ProjectLinkedEntry(parent)
             async for storage in project.storages:
                 yield storage
             return
         if isinstance(parent, ProjectChildrenInode):
             project = parent.project_inode.object
             for child in await self._list_child_projects(project.id):
-                yield child
+                yield ProjectSymlinkEntry(parent, child)
             return
         if isinstance(parent, ProjectLinkedInode):
             project = parent.project_inode.object
             for linked in await self._list_linked_projects(project.id):
-                yield linked
+                yield ProjectSymlinkEntry(parent, linked)
             return
         async for child in parent.object.children:
             yield child
 
-    async def _get_object_inode(self, parent: BaseInode, object: Union[Project, Storage, File, Folder, ProjectAttributesEntry, ProjectChildrenEntry, ProjectLinkedEntry]) -> BaseInode:
+    async def _get_object_inode(self, parent: BaseInode, object: Union[Project, Storage, File, Folder, ProjectAttributesEntry, ProjectChildrenEntry, ProjectLinkedEntry, ProjectSymlinkEntry]) -> BaseInode:
         """Get inode for the object."""
         dummy_inode = self._create_object_inode(self.INODE_DUMMY, parent, object)
         for inode in self._inodes.values():
@@ -845,7 +934,7 @@ class Inodes:
         log.debug(f'new inode: inode={r}')
         return r
 
-    def _create_object_inode(self, inode_num: int, parent: BaseInode, object: Union[Project, Storage, File, Folder, ProjectAttributesEntry, ProjectChildrenEntry, ProjectLinkedEntry]) -> BaseInode:
+    def _create_object_inode(self, inode_num: int, parent: BaseInode, object: Union[Project, Storage, File, Folder, ProjectAttributesEntry, ProjectChildrenEntry, ProjectLinkedEntry, ProjectSymlinkEntry]) -> BaseInode:
         """Create inode object for the object."""
         if isinstance(object, Project):
             metadata = getattr(object, '_rdmfs_attributes', None)
@@ -856,6 +945,8 @@ class Inodes:
             return ProjectChildrenInode(inode_num, object.project_inode)
         if isinstance(object, ProjectLinkedEntry):
             return ProjectLinkedInode(inode_num, object.project_inode)
+        if isinstance(object, ProjectSymlinkEntry):
+            return SymlinkInode(inode_num, parent, object)
         if isinstance(object, Storage):
             return StorageInode(inode_num, parent, object)
         if isinstance(object, Folder):
@@ -922,6 +1013,8 @@ class Inodes:
             child_id = getattr(project, 'id', None)
             if not child_id:
                 continue
+            attributes = node.get('attributes', {}) or {}
+            setattr(project, '_rdmfs_attributes', attributes)
             children[child_id] = project
         ordered = sorted(children.values(), key=lambda p: getattr(p, 'id', ''))
         self._project_children_cache.set(project_id, ordered)
@@ -940,6 +1033,8 @@ class Inodes:
             linked_id = getattr(project, 'id', None)
             if not linked_id:
                 continue
+            attributes = node.get('attributes', {}) or {}
+            setattr(project, '_rdmfs_attributes', attributes)
             linked[linked_id] = project
         ordered = sorted(linked.values(), key=lambda p: getattr(p, 'id', ''))
         self._project_linked_cache.set(project_id, ordered)

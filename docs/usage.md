@@ -41,17 +41,7 @@ docker run --rm -it --privileged \
   rcosdp/cs-rdmfs
 ```
 
-Mount every accessible project (note: leaving `RDM_NODE_ID` unset has the same effect):
-
-```bash
-docker run --rm -it --privileged \
-  -v "$(pwd)/mnt":/mnt \
-  -e RDM_TOKEN=$RDM_TOKEN \
-  -e RDM_API_URL=https://api.rdm.nii.ac.jp/v2/ \
-  rcosdp/cs-rdmfs --all-projects
-```
-
-Or simply omit `RDM_NODE_ID`:
+Mount every accessible project by omitting `RDM_NODE_ID`:
 
 ```bash
 docker run --rm -it --privileged \
