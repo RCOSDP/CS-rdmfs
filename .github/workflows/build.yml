@@ -43,5 +43,6 @@ jobs:
           RDM_NODE_ID: ${{ secrets.RDM_NODE_ID }}
           RDM_TOKEN: ${{ secrets.RDM_TOKEN }}
           RDM_STORAGE: ${{ secrets.RDM_STORAGE || 'osfstorage' }}
+          SKIP_TEST_DOCKER: ${{ github.event_name == 'pull_request' && '1' || '' }}
         run: |
           pytest --cov
