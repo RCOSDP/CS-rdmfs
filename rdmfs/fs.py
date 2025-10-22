@@ -18,9 +18,10 @@ log = logging.getLogger(__name__)
 class RDMFileSystem(pyfuse3.Operations):
     def __init__(self, osf, project, dir_mode=0o755, file_mode=0o644,
                  uid=None, gid=None,
-                 writable_whitelist: Optional[Whitelist]=None):
+                 writable_whitelist: Optional[Whitelist]=None,
+                 list_all_projects: bool=False):
         super(RDMFileSystem, self).__init__()
-        self.inodes = Inodes(osf, project)
+        self.inodes = Inodes(osf, project, list_all_projects=list_all_projects)
         self.file_handlers = FileHandlers()
         self.dir_mode = dir_mode
         self.file_mode = file_mode
@@ -36,7 +37,10 @@ class RDMFileSystem(pyfuse3.Operations):
             if inode is None:
                 raise pyfuse3.FUSEError(errno.ENOENT)
             await inode.refresh(self.inodes)
-            if inode.has_children():
+            if inode.is_symlink:
+                entry.st_mode = (stat.S_IFLNK | 0o777)
+                entry.st_size = len(inode.target)
+            elif inode.has_children():
                 entry.st_mode = (stat.S_IFDIR | self.dir_mode)
                 entry.st_size = 0
             else:
@@ -49,15 +53,15 @@ class RDMFileSystem(pyfuse3.Operations):
             if self.writable_whitelist is not None and \
                 not self.writable_whitelist.includes(inode):
                 entry.st_mode = entry.st_mode & (~0o200)
-            stamp = 0
-            mstamp = stamp
+            ctime_stamp = 0
+            mtime_stamp = 0
             if inode.date_created is not None:
-                stamp = fromisoformat(inode.date_created)
+                ctime_stamp = fromisoformat(inode.date_created)
             if inode.date_modified is not None:
-                mstamp = fromisoformat(inode.date_modified)
-            entry.st_atime_ns = stamp
-            entry.st_ctime_ns = stamp
-            entry.st_mtime_ns = mstamp
+                mtime_stamp = fromisoformat(inode.date_modified)
+            entry.st_atime_ns = mtime_stamp
+            entry.st_ctime_ns = ctime_stamp
+            entry.st_mtime_ns = mtime_stamp
             entry.st_gid = self.gid
             entry.st_uid = self.uid
             entry.st_ino = inode.id
@@ -96,6 +100,21 @@ class RDMFileSystem(pyfuse3.Operations):
             if inode is None:
                 raise pyfuse3.FUSEError(errno.ENOENT)
             return await self.getattr(inode.id)
+        except pyfuse3.FUSEError as e:
+            raise e
+        except BaseException as e:
+            reraise_fuse_error(e)
+
+    async def readlink(self, inode_num, ctx):
+        log.info('readlink: inode={}'.format(inode_num))
+        try:
+            inode = await self.inodes.get(inode_num)
+            if inode is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
+            if not inode.is_symlink:
+                raise pyfuse3.FUSEError(errno.EINVAL)
+            target = inode.target
+            return os.fsencode(target)
         except pyfuse3.FUSEError as e:
             raise e
         except BaseException as e:
@@ -147,6 +166,8 @@ class RDMFileSystem(pyfuse3.Operations):
             inode = await self.inodes.get(inode_num)
             if inode is None:
                 raise pyfuse3.FUSEError(errno.ENOENT)
+            if flags_can_write(flags) and getattr(inode, 'readonly', False):
+                raise pyfuse3.FUSEError(errno.EACCES)
             if flags_can_write(flags) and \
                 self.writable_whitelist is not None and \
                 not self.writable_whitelist.includes(inode):

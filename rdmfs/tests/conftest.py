@@ -7,6 +7,9 @@ def rdm_storage():
 
 @pytest.fixture
 def docker_container():
+    if os.getenv("SKIP_TEST_DOCKER"):
+        pytest.skip("SKIP_TEST_DOCKER is set.")
+
     # Retrieve RDM_NODE_ID and RDM_TOKEN from environment variables
     rdm_node_id = os.getenv("RDM_NODE_ID", "")
     rdm_token = os.getenv("RDM_TOKEN", "")

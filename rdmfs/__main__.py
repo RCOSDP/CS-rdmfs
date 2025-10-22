@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 import asyncio
 import logging
+import os
 import grp
 import pwd
 import re
@@ -45,8 +46,11 @@ def parse_args():
                               'OSF_PASSWORD environment variable'))
     parser.add_argument('--base-url', default=None,
                         help='OSF API URL (Default is https://api.osf.io/v2/)')
-    parser.add_argument('-p', '--project', default=None,
-                        help='OSF project ID')
+    project_group = parser.add_mutually_exclusive_group()
+    project_group.add_argument('-p', '--project', default=None,
+                               help='OSF project ID')
+    project_group.add_argument('--all-projects', action='store_true', default=False,
+                               help='Mount all accessible projects under the root directory')
     parser.add_argument('--file-mode', default='0644',
                         help='Mode of files. default: 0644')
     parser.add_argument('--dir-mode', default='0755',
@@ -85,7 +89,17 @@ def main():
     options = parse_args()
     init_logging(options.debug)
 
+    placeholder_project = None
+    if options.all_projects and options.project is None:
+        placeholder_project = '__all_projects__'
+        options.project = placeholder_project
+
     osf = cli._setup_osf(options)
+    resolved_project = None if options.all_projects else options.project
+
+    if placeholder_project is not None:
+        options.project = None
+
     file_mode = parse_mode(options.file_mode)
     dir_mode = parse_mode(options.dir_mode)
     uid = parse_uid(options.owner)
@@ -94,7 +108,10 @@ def main():
     if options.writable_whitelist is not None:
         with open(options.writable_whitelist, 'r') as f:
             writable_whitelist = whitelist.Whitelist(f)
-    rdmfs = fs.RDMFileSystem(osf, options.project,
+    if not options.all_projects and resolved_project is None:
+        raise SystemExit('either --project or --all-projects must be specified')
+    rdmfs = fs.RDMFileSystem(osf, resolved_project,
+                             list_all_projects=options.all_projects,
                              file_mode=file_mode, dir_mode=dir_mode,
                              uid=uid, gid=gid,
                              writable_whitelist=writable_whitelist)
