@@ -6,12 +6,12 @@ import grp
 import pwd
 import re
 import pyfuse3
-import pyfuse3_asyncio
+import pyfuse3.asyncio
 from rdmfs import fs, whitelist
 from osfclient import cli
 
 
-pyfuse3_asyncio.enable()
+pyfuse3.asyncio.enable()
 
 def init_logging(debug=False):
     formatter = logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s %(threadName)s: '
