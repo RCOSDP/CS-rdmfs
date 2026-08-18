@@ -1,0 +1,13 @@
+services:
+  wb:
+    ports: !reset []
+
+  waterbutler_proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - wb
+    ports:
+      - "7777:80"
+    volumes:
+      - "${GITHUB_WORKSPACE}/.github/nginx/waterbutler.conf:/etc/nginx/conf.d/default.conf:ro"
