@@ -1,0 +1,239 @@
+name: RDMFS E2E test
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - feature/**
+  workflow_dispatch:
+    inputs:
+      rdm_repository:
+        description: RDM-osf.io repository
+        required: false
+        default: RCOSDP/RDM-osf.io
+      rdm_ref:
+        description: RDM-osf.io ref
+        required: false
+        default: develop
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: ${{ matrix.storage.display_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        storage:
+          - id: osfstorage
+            display_name: NII Storage
+            minio_enabled: 'false'
+          - id: s3compatsigv4
+            display_name: S3 Compatible Storage (SigV4)
+            minio_enabled: 'true'
+
+    env:
+      COMPOSE_FILE: docker-compose.yml:docker-compose.override.yml:${{ github.workspace }}/.github/docker-compose.rdmfs-e2e.yml
+      RDM_URL: http://192.168.168.167:5000/
+      RDM_API_URL: http://192.168.168.167:8000/v2/
+      RDMFS_E2E_USERNAME: rdmfs-e2e@example.com
+      RDMFS_E2E_PASSWORD: rdmfs-e2e-password
+      RDMFS_E2E_INSTITUTION: Virginia Tech [Test]
+      MINIO_ENABLED: ${{ matrix.storage.minio_enabled }}
+      MINIO_ALIAS: local
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: rdmfs-root
+      MINIO_BUCKET: rdmfs-e2e
+      MINIO_DUMMY_BUCKET: rdmfs-e2e-dummy
+
+    steps:
+      - name: Check out rdmfs and E2E resources
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check out RDM-osf.io
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.rdm_repository || 'RCOSDP/RDM-osf.io' }}
+          ref: ${{ inputs.rdm_ref || 'develop' }}
+          path: RDM-osf.io
+          fetch-depth: 0
+
+      - name: Configure Docker data root
+        run: |
+          sudo systemctl stop docker
+          sudo mkdir -p /mnt/docker
+          sudo tee /etc/docker/daemon.json <<'EOF'
+          {
+            "data-root": "/mnt/docker"
+          }
+          EOF
+          sudo systemctl start docker
+          docker info
+
+      - name: Install Docker Compose
+        run: |
+          sudo curl -fL "https://github.com/docker/compose/releases/download/v2.40.3/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+          docker-compose version
+
+      - name: Configure RDM host address
+        run: sudo ifconfig lo:0 192.168.168.167 netmask 255.255.255.255 up
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Notebook dependencies
+        working-directory: e2e-test/resources
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Build the bundled rdmfs Dockerfile
+        run: docker build -t rdmfs:e2e .
+
+      - name: Build Elasticsearch with Kuromoji
+        working-directory: e2e-test/resources
+        run: |
+          docker build -t elasticsearch-kuromoji:e2e \
+            -f docker/elasticsearch/Dockerfile.amd64 docker/elasticsearch
+          echo 'ELASTICSEARCH_IMAGE=elasticsearch-kuromoji:e2e' >> "$GITHUB_ENV"
+
+      - name: Generate MinIO credentials
+        if: matrix.storage.minio_enabled == 'true'
+        run: |
+          minio_root_password=$(openssl rand -hex 24)
+          minio_access_key=$(openssl rand -hex 10)
+          minio_secret_key=$(openssl rand -hex 24)
+          minio_dummy_access_key=$(openssl rand -hex 10)
+          minio_dummy_secret_key=$(openssl rand -hex 24)
+
+          echo "::add-mask::$minio_root_password"
+          echo "::add-mask::$minio_access_key"
+          echo "::add-mask::$minio_secret_key"
+          echo "::add-mask::$minio_dummy_access_key"
+          echo "::add-mask::$minio_dummy_secret_key"
+
+          echo "MINIO_ROOT_PASSWORD=$minio_root_password" >> "$GITHUB_ENV"
+          echo "MINIO_ACCESS_KEY=$minio_access_key" >> "$GITHUB_ENV"
+          echo "MINIO_SECRET_KEY=$minio_secret_key" >> "$GITHUB_ENV"
+          echo "MINIO_DUMMY_ACCESS_KEY=$minio_dummy_access_key" >> "$GITHUB_ENV"
+          echo "MINIO_DUMMY_SECRET_KEY=$minio_dummy_secret_key" >> "$GITHUB_ENV"
+
+      - name: Configure RDM services
+        working-directory: RDM-osf.io
+        run: |
+          source "${GITHUB_WORKSPACE}/e2e-test/resources/.github/scripts/setup_rdm.sh"
+          setup_config_files
+          create_docker_override
+
+      - name: Install RDM requirements
+        working-directory: RDM-osf.io
+        run: |
+          source "${GITHUB_WORKSPACE}/e2e-test/resources/.github/scripts/setup_rdm.sh"
+          install_requirements
+        timeout-minutes: 15
+
+      - name: Initialize RDM database
+        working-directory: RDM-osf.io
+        run: |
+          source "${GITHUB_WORKSPACE}/e2e-test/resources/.github/scripts/setup_rdm.sh"
+          run_migrations
+          compile_translations
+          start_asset_services
+
+      - name: Start RDM services
+        working-directory: RDM-osf.io
+        run: |
+          source "${GITHUB_WORKSPACE}/e2e-test/resources/.github/scripts/setup_rdm.sh"
+          start_rdm_services
+          docker-compose up -d waterbutler_proxy
+          test_rdm_endpoints
+
+      - name: Register OAuth scopes
+        working-directory: RDM-osf.io
+        run: docker-compose run --rm web python3 -m scripts.register_oauth_scopes
+
+      - name: Create the dedicated user fixture without a project
+        working-directory: RDM-osf.io
+        run: |
+          docker-compose run --rm web python3 -m scripts.populate_institutions -e test -a
+          docker cp "${GITHUB_WORKSPACE}/e2e-test/setup_test_user.py" "$(docker-compose ps -q web)":/tmp/setup_test_user.py
+          docker-compose exec -T \
+            -e RDMFS_E2E_USERNAME \
+            -e RDMFS_E2E_PASSWORD \
+            -e RDMFS_E2E_INSTITUTION \
+            web bash -c 'python3 manage.py shell < /tmp/setup_test_user.py'
+
+      - name: Initialize MinIO
+        if: matrix.storage.minio_enabled == 'true'
+        working-directory: e2e-test/resources
+        run: |
+          .github/scripts/setup_minio_buckets.sh \
+            ../../RDM-osf.io \
+            "$MINIO_ALIAS" \
+            "$MINIO_ENDPOINT" \
+            "$MINIO_ROOT_USER" \
+            "$MINIO_ROOT_PASSWORD" \
+            "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "$MINIO_BUCKET" \
+            "$MINIO_DUMMY_ACCESS_KEY" "$MINIO_DUMMY_SECRET_KEY" "$MINIO_DUMMY_BUCKET"
+
+      - name: Run the bidirectional Notebook
+        working-directory: e2e-test
+        run: |
+          mkdir -p result
+          papermill \
+            テスト手順-rdmfs-ストレージ双方向操作.ipynb \
+            "result/${{ matrix.storage.id }}.ipynb" \
+            -p rdm_url "$RDM_URL" \
+            -p rdm_api_url "$RDM_API_URL" \
+            -p idp_name_1 FakeCAS \
+            -p read_credentials_from_environment true \
+            -p rdm_project_name "TEST-RDMFS-${{ matrix.storage.id }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -p target_storage_id "${{ matrix.storage.id }}" \
+            -p target_storage_name "${{ matrix.storage.display_name }}" \
+            -p minio_enabled "${{ matrix.storage.minio_enabled }}" \
+            -p minio_service_name 'MinIO (CI)' \
+            -p minio_bucket "$MINIO_BUCKET" \
+            -p default_result_path "${GITHUB_WORKSPACE}/e2e-test/result/${{ matrix.storage.id }}" \
+            -p transition_timeout 60000 \
+            -p sync_timeout 60
+
+      - name: Show service status and logs
+        if: always()
+        working-directory: RDM-osf.io
+        run: |
+          rdmfs_container=$(docker container ls -a --filter 'name=^/rdmfs-e2e$' --format '{{.Names}}')
+          if [ "$rdmfs_container" = 'rdmfs-e2e' ]; then
+            docker logs rdmfs-e2e
+          fi
+          docker-compose ps -a
+          docker-compose logs --no-color
+
+      - name: Upload Notebook evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdmfs-e2e-${{ matrix.storage.id }}
+          path: e2e-test/result/
+          if-no-files-found: warn
+
+      - name: Tear down E2E services
+        if: always()
+        run: |
+          container_name=$(docker container ls -a --filter 'name=^/rdmfs-e2e$' --format '{{.Names}}')
+          if [ "$container_name" = 'rdmfs-e2e' ]; then
+            docker rm -f rdmfs-e2e
+          fi
+          cd RDM-osf.io
+          docker-compose down --volumes

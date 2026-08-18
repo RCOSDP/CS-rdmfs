@@ -1,0 +1,7 @@
+.git
+.github
+.pytest_cache
+.coverage
+e2e-test
+__pycache__
+*.egg-info
