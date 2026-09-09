@@ -1,0 +1,3 @@
+[submodule "e2e-test/resources"]
+	path = e2e-test/resources
+	url = https://github.com/RCOSDP/RDM-e2e-test-nb.git

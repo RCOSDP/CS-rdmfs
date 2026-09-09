@@ -5,3 +5,4 @@ sample.txt
 
 *.egg-info
 __pycache__
+e2e-test/result/
