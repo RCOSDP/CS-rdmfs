@@ -109,6 +109,15 @@ jobs:
             -f docker/elasticsearch/Dockerfile.amd64 docker/elasticsearch
           echo 'ELASTICSEARCH_IMAGE=elasticsearch-kuromoji:e2e' >> "$GITHUB_ENV"
 
+      - name: Build MinIO images from source
+        if: matrix.storage.minio_enabled == 'true'
+        working-directory: e2e-test/resources
+        run: |
+          docker build -t minio-source:local -f docker/minio/Dockerfile.minio docker/minio
+          docker build -t minio-mc-source:local -f docker/minio/Dockerfile.mc docker/minio
+          echo 'MINIO_IMAGE=minio-source:local' >> "$GITHUB_ENV"
+          echo 'MINIO_MC_IMAGE=minio-mc-source:local' >> "$GITHUB_ENV"
+
       - name: Generate MinIO credentials
         if: matrix.storage.minio_enabled == 'true'
         run: |

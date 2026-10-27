@@ -164,7 +164,7 @@ async def test_list_all_projects_creates_virtual_root():
     response_linked_meta.json.return_value = linked_metadata_payload
     storage_response = MagicMock()
     storage_response.status_code = 200
-    storage_response.json.return_value = {'data': []}
+    storage_response.json.return_value = {'data': [], 'links': {'next': None}}
     mock_osf.session.get = AsyncMock(return_value=storage_response)
 
     responses = [
@@ -310,7 +310,7 @@ async def test_list_all_projects_handles_pagination():
 
     storage_response = MagicMock()
     storage_response.status_code = 200
-    storage_response.json.return_value = {'data': []}
+    storage_response.json.return_value = {'data': [], 'links': {'next': None}}
     mock_osf.session.get = AsyncMock(return_value=storage_response)
     mock_osf._get = AsyncMock(side_effect=[response_page1, response_page2, response_meta1, response_meta2])
     mock_osf._json = MagicMock(side_effect=lambda resp, status: resp.json())
